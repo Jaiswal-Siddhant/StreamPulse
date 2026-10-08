@@ -38,3 +38,19 @@ func TestValidationRejectsInvalidRate(t *testing.T) {
 		t.Fatalf("stderr missing validation error: %q", errOut.String())
 	}
 }
+
+func TestTransportFlags(t *testing.T) {
+	cfg, err := ParseArgs([]string{"--transport", "grpc", "--target", "localhost:50051", "--workers", "10", "--timeout", "2s"}, &bytes.Buffer{})
+	if err != nil || cfg.Concurrency != 10 || cfg.Timeout.String() != "2s" {
+		t.Fatalf("cfg=%+v err=%v", cfg, err)
+	}
+	cfg, err = ParseArgs([]string{"--transport", "http"}, &bytes.Buffer{})
+	if err != nil || cfg.Target != "http://127.0.0.1:8080" {
+		t.Fatalf("HTTP cfg=%+v err=%v", cfg, err)
+	}
+	for _, args := range [][]string{{"--transport", "invalid"}, {"--timeout", "0s"}, {"--target", "http://localhost:50051"}, {"--target", "example.com:50051"}, {"--workers", "0"}} {
+		if _, err := ParseArgs(args, &bytes.Buffer{}); err == nil {
+			t.Fatalf("accepted invalid args: %v", args)
+		}
+	}
+}

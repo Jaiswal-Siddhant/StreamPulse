@@ -6,12 +6,13 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/url"
 	"strings"
 	"time"
 )
 
-const Version = "0.2.0-phase1"
+const Version = "0.3.0-phase2"
 
 type Config struct {
 	Rate        float64
@@ -24,6 +25,8 @@ type Config struct {
 	DryRun      bool
 	Version     bool
 	EventType   string
+	Transport   string
+	Timeout     time.Duration
 }
 
 func DefaultConfig() Config {
@@ -31,7 +34,9 @@ func DefaultConfig() Config {
 		Rate:        1,
 		Duration:    30 * time.Second,
 		Concurrency: 1,
-		Target:      "http://127.0.0.1:8080",
+		Target:      "127.0.0.1:50051",
+		Transport:   "grpc",
+		Timeout:     5 * time.Second,
 		EventType:   "synthetic",
 		PayloadSize: 512,
 		Seed:        1,
@@ -73,7 +78,7 @@ func ParseArgs(args []string, output io.Writer) (Config, error) {
 	fs.Usage = func() {
 		fmt.Fprintln(output, "Usage: go run simulateLoad.go [flags]")
 		fmt.Fprintln(output)
-		fmt.Fprintln(output, "Send synthetic events to the Phase 1 HTTP ingress. Use --dry-run to print the planned run.")
+		fmt.Fprintln(output, "Send synthetic events via gRPC or HTTP. Use --dry-run to print the planned run.")
 		fmt.Fprintln(output)
 		fs.PrintDefaults()
 	}
@@ -86,6 +91,9 @@ func ParseArgs(args []string, output io.Writer) (Config, error) {
 	fs.Int64Var(&cfg.Count, "count", cfg.Count, "optional total request cap")
 	fs.IntVar(&cfg.Concurrency, "c", cfg.Concurrency, "worker concurrency")
 	fs.IntVar(&cfg.Concurrency, "concurrency", cfg.Concurrency, "worker concurrency")
+	fs.IntVar(&cfg.Concurrency, "workers", cfg.Concurrency, "worker concurrency (alias)")
+	fs.StringVar(&cfg.Transport, "transport", cfg.Transport, "transport: grpc or http")
+	fs.DurationVar(&cfg.Timeout, "timeout", cfg.Timeout, "per-request timeout")
 	fs.StringVar(&cfg.Target, "target", cfg.Target, "server address")
 	fs.StringVar(&cfg.EventType, "event-type", cfg.EventType, "synthetic event type")
 	fs.IntVar(&cfg.PayloadSize, "payload-size", cfg.PayloadSize, "payload size in bytes")
@@ -98,6 +106,15 @@ func ParseArgs(args []string, output io.Writer) (Config, error) {
 	}
 	if fs.NArg() > 0 {
 		return Config{}, fmt.Errorf("unexpected positional arguments: %v", fs.Args())
+	}
+	targetSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "target" {
+			targetSet = true
+		}
+	})
+	if cfg.Transport == "http" && !targetSet {
+		cfg.Target = "http://127.0.0.1:8080"
 	}
 	return cfg, cfg.Validate()
 }
@@ -115,9 +132,23 @@ func (cfg Config) Validate() error {
 	if cfg.Concurrency <= 0 {
 		return fmt.Errorf("concurrency must be > 0")
 	}
-	u, err := url.Parse(cfg.Target)
-	if err != nil || u.Scheme != "http" || u.Host == "" || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
-		return fmt.Errorf("target must be an HTTP origin such as http://127.0.0.1:8080")
+	if cfg.Timeout <= 0 {
+		return fmt.Errorf("timeout must be > 0")
+	}
+	switch cfg.Transport {
+	case "http":
+		u, err := url.Parse(cfg.Target)
+		if err != nil || u.Scheme != "http" || u.Host == "" || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("target must be an HTTP origin such as http://127.0.0.1:8080")
+		}
+	case "grpc":
+		host, port, err := net.SplitHostPort(cfg.Target)
+		ip := net.ParseIP(host)
+		if err != nil || port == "" || (host != "localhost" && (ip == nil || !ip.IsLoopback())) {
+			return fmt.Errorf("Phase 2 plaintext gRPC target must be a loopback host:port")
+		}
+	default:
+		return fmt.Errorf("transport must be grpc or http")
 	}
 	if cfg.PayloadSize < 2 || cfg.PayloadSize > 16*1024*1024 {
 		return fmt.Errorf("payload-size must be between 2 and 16777216 bytes")

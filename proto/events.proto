@@ -25,7 +25,10 @@ message PublishRequest {
 
 message PublishResponse {
   string event_id = 1;
+  // True only after a durable Kafka acknowledgement in a later phase.
   bool kafka_accepted = 2;
+  // Phase 2 confirms validation and logging, without durable storage.
+  bool received = 3;
 }
 
 message PublishSummary {

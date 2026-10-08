@@ -7,12 +7,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/jaiswaladi246/streampulse/internal/ingestion"
+	pb "github.com/jaiswaladi246/streampulse/proto/streampulsev1"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 type Result struct {
@@ -26,6 +31,11 @@ type Result struct {
 	Failed          int64
 	Dropped         int64
 	FirstError      string
+	ErrorTypes      map[string]int64
+	AckP50          time.Duration
+	AckP95          time.Duration
+	AckP99          time.Duration
+	AckSamples      int
 }
 
 func Run(cfg Config) (Result, error) {
@@ -41,24 +51,61 @@ func Run(cfg Config) (Result, error) {
 	defer cancel()
 	transport := &http.Transport{MaxConnsPerHost: cfg.Concurrency, MaxIdleConnsPerHost: cfg.Concurrency}
 	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, Timeout: 5 * time.Second, CheckRedirect: func(r *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
+	client := &http.Client{Transport: transport, Timeout: cfg.Timeout, CheckRedirect: func(r *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
+	send := func(ctx context.Context, event ingestion.Event) error { return publish(ctx, client, cfg.Target, event) }
+	if cfg.Transport == "grpc" {
+		conn, err := grpc.NewClient(cfg.Target, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithDisableRetry(), grpc.WithDefaultCallOptions(grpc.MaxCallSendMsgSize(16*1024*1024+4096)))
+		if err != nil {
+			return Result{}, err
+		}
+		defer conn.Close()
+		rpc := pb.NewEventServiceClient(conn)
+		send = func(ctx context.Context, event ingestion.Event) error {
+			response, err := rpc.Publish(ctx, &pb.PublishRequest{Event: &pb.Event{EventId: event.EventID, EventType: event.EventType, Source: event.Source, OccurredAtMs: event.OccurredAtMS, SchemaVersion: event.SchemaVersion, PayloadJson: event.Payload, UserId: event.UserID}})
+			if err != nil {
+				return err
+			}
+			if !response.Received || response.EventId != event.EventID {
+				return fmt.Errorf("invalid receipt for %s", event.EventID)
+			}
+			return nil
+		}
+	}
 	jobs := make(chan int64, cfg.Concurrency)
 	var sent, received, failed atomic.Int64
 	var wg sync.WaitGroup
-	var first sync.Once
+	var mu sync.Mutex
+	latencies := make([]time.Duration, 0, 10000)
+	result.ErrorTypes = make(map[string]int64)
 	for worker := 0; worker < cfg.Concurrency; worker++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for index := range jobs {
+				if ctx.Err() != nil {
+					continue
+				}
 				event := GenerateEvent(cfg, result.RunID, index, time.Now())
 				sent.Add(1)
-				if err := publish(ctx, client, cfg.Target, event); err != nil {
+				requestCtx, requestCancel := context.WithTimeout(ctx, cfg.Timeout)
+				start := time.Now()
+				err := send(requestCtx, event)
+				elapsed := time.Since(start)
+				requestCancel()
+				mu.Lock()
+				if err != nil {
 					failed.Add(1)
-					first.Do(func() { result.FirstError = err.Error() })
+					if result.FirstError == "" {
+						result.FirstError = err.Error()
+					}
+					result.ErrorTypes[status.Code(err).String()]++
 				} else {
 					received.Add(1)
+					if len(latencies) < cap(latencies) {
+						latencies = append(latencies, elapsed)
+					}
 				}
+				mu.Unlock()
 			}
 		}()
 	}
@@ -85,7 +132,18 @@ schedule:
 	result.Sent, result.Received, result.Failed = sent.Load(), received.Load(), failed.Load()
 	result.Dropped = result.PlannedRequests - result.Sent
 	result.EndedAtUTC = time.Now().UTC()
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	result.AckSamples = len(latencies)
+	if len(latencies) > 0 {
+		result.AckP50 = percentile(latencies, 50)
+		result.AckP95 = percentile(latencies, 95)
+		result.AckP99 = percentile(latencies, 99)
+	}
 	return result, nil
+}
+
+func percentile(samples []time.Duration, p int) time.Duration {
+	return samples[(len(samples)*p+99)/100-1]
 }
 
 func publish(ctx context.Context, client *http.Client, target string, event ingestion.Event) error {

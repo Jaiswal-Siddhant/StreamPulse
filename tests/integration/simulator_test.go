@@ -22,6 +22,7 @@ func TestSimulatorReceipts(t *testing.T) {
 			server := httptest.NewServer(ingress.Handler())
 			defer server.Close()
 			cfg := simulator.DefaultConfig()
+			cfg.Transport = "http"
 			cfg.Target = server.URL
 			cfg.Count = count
 			cfg.Rate = 100
@@ -93,7 +94,7 @@ func TestSimulatorFailure(t *testing.T) {
 	server := httptest.NewServer(ingress.Handler())
 	defer server.Close()
 	var out, stderr bytes.Buffer
-	code := simulator.Main([]string{"--target", server.URL, "-n", "1", "-r", "10"}, &out, &stderr)
+	code := simulator.Main([]string{"--transport", "http", "--target", server.URL, "-n", "1", "-r", "10"}, &out, &stderr)
 	if code != 1 || ingress.Stats().Rejected != 1 {
 		t.Fatalf("code=%d stdout=%s stderr=%s", code, &out, &stderr)
 	}

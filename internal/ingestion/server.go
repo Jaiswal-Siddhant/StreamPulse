@@ -19,6 +19,7 @@ type Event struct {
 	OccurredAtMS  int64           `json:"occurred_at_ms"`
 	SchemaVersion uint32          `json:"schema_version"`
 	Payload       json.RawMessage `json:"payload_json"`
+	UserID        string          `json:"user_id,omitempty"`
 }
 
 type Receipt struct {
@@ -52,6 +53,9 @@ func Validate(event Event, maxPayload int) error {
 	}
 	if len(event.EventID) > 256 || len(event.EventType) > 256 || len(event.Source) > 256 {
 		return errors.New("event_id, event_type and source must be at most 256 bytes")
+	}
+	if len(event.UserID) > 256 {
+		return errors.New("user_id must be at most 256 bytes")
 	}
 	if event.OccurredAtMS <= 0 || event.SchemaVersion != 1 {
 		return errors.New("occurred_at_ms must be positive and schema_version must be 1")
@@ -105,9 +109,13 @@ func (s *Server) publish(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, code, map[string]string{"error": err.Error()})
 		return
 	}
+	s.record(event)
+	writeJSON(w, http.StatusOK, Receipt{EventID: event.EventID, Received: true})
+}
+
+func (s *Server) record(event Event) {
 	s.logger.Info("event received", "event_id", event.EventID, "event_type", event.EventType, "source", event.Source, "payload_bytes", len(event.Payload))
 	s.received.Add(1)
-	writeJSON(w, http.StatusOK, Receipt{EventID: event.EventID, Received: true})
 }
 
 func writeJSON(w http.ResponseWriter, code int, value any) {

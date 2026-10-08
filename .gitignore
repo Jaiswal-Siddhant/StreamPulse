@@ -1,0 +1,3 @@
+.cache/
+benchmarks/results/*
+!benchmarks/results/.gitkeep

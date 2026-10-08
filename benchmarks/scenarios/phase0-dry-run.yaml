@@ -1,0 +1,6 @@
+name: phase0-dry-run
+rate: 10
+duration: 10s
+count: 100
+concurrency: 1
+payload_size: 512

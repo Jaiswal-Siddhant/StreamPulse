@@ -1,0 +1,25 @@
+services:
+  kafka:
+    image: apache/kafka:4.0.0
+    profiles: ["future"]
+    ports:
+      - "9092:9092"
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8
+    profiles: ["future"]
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+
+  prometheus:
+    image: prom/prometheus:v3.6.0
+    profiles: ["future"]
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    profiles: ["future"]
+    ports:
+      - "3000:3000"

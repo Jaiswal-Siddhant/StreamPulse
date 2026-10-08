@@ -5,10 +5,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
+	"net/url"
+	"strings"
 	"time"
 )
 
-const Version = "0.1.0-phase0"
+const Version = "0.2.0-phase1"
 
 type Config struct {
 	Rate        float64
@@ -20,6 +23,7 @@ type Config struct {
 	Seed        int64
 	DryRun      bool
 	Version     bool
+	EventType   string
 }
 
 func DefaultConfig() Config {
@@ -27,7 +31,8 @@ func DefaultConfig() Config {
 		Rate:        1,
 		Duration:    30 * time.Second,
 		Concurrency: 1,
-		Target:      "localhost:50051",
+		Target:      "http://127.0.0.1:8080",
+		EventType:   "synthetic",
 		PayloadSize: 512,
 		Seed:        1,
 	}
@@ -55,6 +60,9 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	}
 
 	PrintTextReport(stdout, result)
+	if result.Failed > 0 || result.Dropped > 0 {
+		return 1
+	}
 	return 0
 }
 
@@ -65,7 +73,7 @@ func ParseArgs(args []string, output io.Writer) (Config, error) {
 	fs.Usage = func() {
 		fmt.Fprintln(output, "Usage: go run simulateLoad.go [flags]")
 		fmt.Fprintln(output)
-		fmt.Fprintln(output, "Phase 0 validates simulator configuration. Use --dry-run to print the planned run.")
+		fmt.Fprintln(output, "Send synthetic events to the Phase 1 HTTP ingress. Use --dry-run to print the planned run.")
 		fmt.Fprintln(output)
 		fs.PrintDefaults()
 	}
@@ -79,6 +87,7 @@ func ParseArgs(args []string, output io.Writer) (Config, error) {
 	fs.IntVar(&cfg.Concurrency, "c", cfg.Concurrency, "worker concurrency")
 	fs.IntVar(&cfg.Concurrency, "concurrency", cfg.Concurrency, "worker concurrency")
 	fs.StringVar(&cfg.Target, "target", cfg.Target, "server address")
+	fs.StringVar(&cfg.EventType, "event-type", cfg.EventType, "synthetic event type")
 	fs.IntVar(&cfg.PayloadSize, "payload-size", cfg.PayloadSize, "payload size in bytes")
 	fs.Int64Var(&cfg.Seed, "seed", cfg.Seed, "deterministic generator seed")
 	fs.BoolVar(&cfg.DryRun, "dry-run", cfg.DryRun, "validate and print configuration without sending requests")
@@ -94,7 +103,7 @@ func ParseArgs(args []string, output io.Writer) (Config, error) {
 }
 
 func (cfg Config) Validate() error {
-	if cfg.Rate <= 0 {
+	if cfg.Rate <= 0 || math.IsNaN(cfg.Rate) || math.IsInf(cfg.Rate, 0) || cfg.Rate*cfg.Duration.Seconds() >= float64(math.MaxInt64) {
 		return fmt.Errorf("rate must be > 0")
 	}
 	if cfg.Duration <= 0 {
@@ -106,11 +115,15 @@ func (cfg Config) Validate() error {
 	if cfg.Concurrency <= 0 {
 		return fmt.Errorf("concurrency must be > 0")
 	}
-	if cfg.Target == "" {
-		return fmt.Errorf("target must not be empty")
+	u, err := url.Parse(cfg.Target)
+	if err != nil || u.Scheme != "http" || u.Host == "" || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("target must be an HTTP origin such as http://127.0.0.1:8080")
 	}
-	if cfg.PayloadSize < 0 {
-		return fmt.Errorf("payload-size must be >= 0")
+	if cfg.PayloadSize < 2 || cfg.PayloadSize > 16*1024*1024 {
+		return fmt.Errorf("payload-size must be between 2 and 16777216 bytes")
+	}
+	if strings.TrimSpace(cfg.EventType) == "" || len(cfg.EventType) > 256 {
+		return fmt.Errorf("event-type must contain 1 to 256 bytes")
 	}
 	return nil
 }
